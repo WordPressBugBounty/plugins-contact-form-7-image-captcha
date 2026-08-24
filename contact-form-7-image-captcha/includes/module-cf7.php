@@ -126,7 +126,9 @@ function cf7ic_check_if_spam($result, $tag)
     // Because the validator is triggered on every submission, look through tags to see if cf7ic is being used
     $key = array_search('cf7ic', array_column($tag, 'type'));
 
-    if (!empty($key)) { // If cf7ic is being used on the form, run validation
+    // Compare against false, not with empty(): array_search returns index 0 when [cf7ic] is the
+    // FIRST form tag, and empty(0) is true, so the whole validation was skipped for those forms
+    if (false !== $key) { // If cf7ic is being used on the form, run validation
         $tag = new WPCF7_FormTag($tag);
         $tag->name = "kc_captcha";
 
