@@ -57,7 +57,10 @@ function call_cf7ic($tag)
     }
 
     // Pick a number between 0-2 and use it to determine which array item will be used as the answer
-    $human = rand(0, 2);
+    $human = random_int(0, 2);
+
+    // Signed per-render token: only the server can tell which radio value is the correct one
+    $token = cf7ic_token_create();
 
     if ($toggle == 'toggle') {
         $style = 'style="display: none;"';
@@ -77,9 +80,9 @@ function call_cf7ic($tag)
     foreach ($choices as $title => $image) {
         $i++;
         if ($i == $human) {
-            $value = "kc_human";
+            $value = cf7ic_token_answer($token);
         } else {
-            $value = "bot";
+            $value = bin2hex(random_bytes(32)); // Same length as the answer, so the markup gives nothing away
         };
         $output .= '<label><input aria-label="' . ($i + 1) . '" type="radio" name="kc_captcha" value="' . $value . '" />' . $image . '</label>';
     }
@@ -88,9 +91,46 @@ function call_cf7ic($tag)
     </span>
     <span style="display:none">
         <input type="text" name="kc_honeypot">
+        <input type="hidden" name="kc_token" value="' . esc_attr($token) . '">
     </span>';
 
     return '<span class="wpcf7-form-control-wrap kc_captcha' . $toggle_class . '" data-name="kc_captcha"><span class="wpcf7-form-control wpcf7-radio">' . $output . '</span></span>';
+}
+
+/**
+ * How long a rendered CF7 CAPTCHA stays valid. Long on purpose: a page cache can serve the same
+ * rendered form for days, and an expired token makes that cached form unsubmittable.
+ */
+define('CF7IC_TOKEN_LIFETIME', 7 * DAY_IN_SECONDS);
+
+/**
+ * Token = "<unix time>.<32 random hex chars>". Stateless: nothing is stored, so it works without a
+ * database table and survives page caching.
+ */
+function cf7ic_token_create()
+{
+    return time() . '.' . bin2hex(random_bytes(16));
+}
+
+/**
+ * The radio value that counts as correct for a token. Keyed with the site's secret salt, so it cannot
+ * be computed from the page.
+ */
+function cf7ic_token_answer($token)
+{
+    return hash_hmac('sha256', 'cf7ic|' . $token, wp_salt('nonce'));
+}
+
+/**
+ * True if the token is well-formed and not older than CF7IC_TOKEN_LIFETIME.
+ */
+function cf7ic_token_is_current($token)
+{
+    if (!preg_match('/^(\d{1,12})\.[0-9a-f]{32}$/', $token, $m)) {
+        return false;
+    }
+    $age = time() - (int) $m[1];
+    return $age >= -60 && $age <= CF7IC_TOKEN_LIFETIME; // -60: tolerate small clock differences
 }
 
 function cf7ic_toggle()
@@ -132,10 +172,17 @@ function cf7ic_check_if_spam($result, $tag)
         $tag = new WPCF7_FormTag($tag);
         $tag->name = "kc_captcha";
 
-        $kc_val1 = isset($_POST['kc_captcha']) ? trim($_POST['kc_captcha']) : ''; // Get selected icon value
-        $kc_val2 = isset($_POST['kc_honeypot']) ? trim($_POST['kc_honeypot']) : ''; // Get honeypot value
+        $kc_val1 = isset($_POST['kc_captcha']) && is_string($_POST['kc_captcha']) ? trim($_POST['kc_captcha']) : ''; // Get selected icon value
+        $kc_val2 = isset($_POST['kc_honeypot']) && is_string($_POST['kc_honeypot']) ? trim($_POST['kc_honeypot']) : ''; // Get honeypot value
+        $kc_token = isset($_POST['kc_token']) && is_string($_POST['kc_token']) ? trim($_POST['kc_token']) : ''; // Get render token
 
-        if (!empty($kc_val1) && $kc_val1 != 'kc_human') {
+        if (!empty($kc_val1) && !cf7ic_token_is_current($kc_token)) {
+            // Missing, malformed or expired token, e.g. a page cached before this check existed.
+            // A well-formed but forged token fails the answer check below instead.
+            $tag->name = "kc_captcha";
+            $error = __('The captcha was incorrect. Please reload the page.', 'contact-form-7-image-captcha');
+            $result->invalidate($tag, $error);
+        } elseif (!empty($kc_val1) && !hash_equals(cf7ic_token_answer($kc_token), $kc_val1)) {
             $tag->name = "kc_captcha";
             $error = __('Please select the correct icon.', 'contact-form-7-image-captcha');
             $result->invalidate($tag, $error);
